@@ -13,6 +13,7 @@ def generate_training_data(
     n_timesteps: int,
     q_0: Callable[[np.ndarray], np.ndarray],
     u: Callable[[int], np.ndarray] | None = None,
+    mu: float | None = None,
 ):
     """Generate sample data to be used for Operator Inference.
 
@@ -24,6 +25,10 @@ def generate_training_data(
     u: External input function. Accepts a time value and returns the input
         values for that time step. If None, u defaults is the zero function
         (for a model that does not use external inputs)
+    mu: Model parameter. If none, a non-parametric model is used.
+
+    Note: 'u' and 'mu' cannot both be specified
+    (the model can use external inputs or parameters or neither, but not both)
 
     Returns:
     t: Array of time points.
@@ -45,23 +50,43 @@ def generate_training_data(
     diags = np.array([1, -2, 1]) / dx**2
     A = scipy.sparse.diags(diags, [-1, 0, 1], (n_samples, n_samples))
 
-    # construct the matrix of external input operators
-    B = np.zeros_like(x)
-    B[0], B[-1] = 1 / dx**2, 1 / dx**2
+    if mu is None:
+        # non-parametric
 
-    fom = opinf.models.ContinuousModel(
-        operators=[
-            opinf.operators.LinearOperator(A),
-            opinf.operators.InputOperator(B),
-        ]
-    )
+        # construct the matrix of external input operators
+        B = np.zeros_like(x)
+        B[0], B[-1] = 1 / dx**2, 1 / dx**2
 
-    initial_values = q_0(x)
-    initial_values = (
-        initial_values if not external_inputs else initial_values * u(0)
-    )
+        fom = opinf.models.ContinuousModel(
+            operators=[
+                opinf.operators.LinearOperator(A),
+                opinf.operators.InputOperator(B),
+            ]
+        )
 
-    return t, fom.predict(initial_values, t, input_func=u, method="BDF")
+        initial_values = q_0(x)
+        initial_values = (
+            initial_values if not external_inputs else initial_values * u(0)
+        )
+
+        return t, fom.predict(initial_values, t, input_func=u, method="BDF")
+    else:
+        # parametric
+
+        # construc the constant term dependent on mu
+        c0 = np.zeros_like(x)
+        c0[0], c0[-1] = 1 / dx**2, 1 / dx**2
+
+        return (
+            t,
+            scipy.integrate.solve_ivp(
+                fun=lambda t, q: mu * (c0 + A @ q),
+                y0=q_0(x),
+                t_span=[t[0], t[-1]],
+                t_eval=t,
+                method="BDF",
+            ).y,
+        )
 
 
 def save_data_to_file(
@@ -159,7 +184,7 @@ def generate_external_inputs_data(filepath: str = "inputs_data.h5"):
     f = h5py.File(filepath, "w")
 
     # generate the default training data (for the first part of the tutorial)
-    t, Q = generate_training_data(n_samples, n_timesteps, q_0, u)
+    t, Q = generate_training_data(n_samples, n_timesteps, q_0, u=u)
     U = u(t)
 
     f.create_dataset("t", data=t)
@@ -175,11 +200,11 @@ def generate_external_inputs_data(filepath: str = "inputs_data.h5"):
         zip(train_inputs, test_inputs)
     ):
         _, Q_train = generate_training_data(
-            n_samples, n_timesteps, q_0, train_input
+            n_samples, n_timesteps, q_0, u=train_input
         )
         U_train = train_input(t)
         _, Q_test = generate_training_data(
-            n_samples, n_timesteps, q_0, test_input
+            n_samples, n_timesteps, q_0, u=test_input
         )
         U_test = test_input(t)
 
@@ -187,6 +212,39 @@ def generate_external_inputs_data(filepath: str = "inputs_data.h5"):
         train_grp.create_dataset(f"U_{idx}", data=U_train)
         test_grp.create_dataset(f"Q_{idx}", data=Q_test)
         test_grp.create_dataset(f"U_{idx}", data=U_test)
+
+    f.close()
+    print(f"Training data saved to {filepath}")
+
+
+def generate_parametric_data(filepath: str = "parametric_data.h5"):
+    n_samples = 1023
+    n_timesteps = 401
+
+    alpha = 100
+
+    # the part of the initial condition independent of u(t)
+    def q_0(x):
+        return np.exp(alpha * (x - 1)) + np.exp(-alpha * x) - np.exp(-alpha)
+
+    # create logarithmically spaced values for mu
+    num_training_parameters = 10
+    training_parameters = np.logspace(-1, 1, num_training_parameters)
+
+    # initialize the h5 file to write to
+    f = h5py.File(filepath, "w")
+    train_grp = f.create_group("train")
+    train_grp.attrs["num_mu_values"] = num_training_parameters
+
+    for idx, mu in enumerate(training_parameters):
+        t, Q = generate_training_data(n_samples, n_timesteps, q_0, mu=mu)
+
+        if idx == 0:
+            # on the first iteration, also save the temporal dimension
+            train_grp.create_dataset("t", data=t)
+
+        dset = train_grp.create_dataset(f"Step {idx+1}", data=Q)
+        dset.attrs["mu"] = mu
 
     f.close()
     print(f"Training data saved to {filepath}")
@@ -221,6 +279,6 @@ if __name__ == "__main__":
             str(BASE_DIR / "source" / "tutorials" / "inputs_data.h5")
         )
     if data_to_generate == "parametric" or data_to_generate == "all":
-        raise NotImplementedError(
-            "Parametric data generation has not yet been implemented!"
+        generate_parametric_data(
+            str(BASE_DIR / "source" / "tutorials" / "parametric_data.h5")
         )
