@@ -34,13 +34,6 @@ def generate_training_data(
     t: Array of time points.
     Q: Array of "observed" snapshots, shape (n_samples, n_timesteps).
     """
-    external_inputs = True
-    if u is None:
-        external_inputs = False
-
-        def u(t):
-            return 0
-
     # construct the spatial and temporal domains
     x = np.linspace(0, 1, n_samples + 2)[1:-1]
     dx = x[1] - x[0]
@@ -52,6 +45,13 @@ def generate_training_data(
 
     if mu is None:
         # non-parametric
+
+        external_inputs = True
+        if u is None:
+            external_inputs = False
+
+            def u(t):
+                return 0
 
         # construct the matrix of external input operators
         B = np.zeros_like(x)
@@ -73,7 +73,7 @@ def generate_training_data(
     else:
         # parametric
 
-        # construc the constant term dependent on mu
+        # construct the constant term dependent on mu
         c0 = np.zeros_like(x)
         c0[0], c0[-1] = 1 / dx**2, 1 / dx**2
 
@@ -87,16 +87,6 @@ def generate_training_data(
                 method="BDF",
             ).y,
         )
-
-
-def save_data_to_file(
-    t: np.ndarray, Q: np.ndarray, filepath: str, overwrite=True
-):
-    with opinf.utils.hdf5_savehandle(filepath, overwrite=overwrite) as h5file:
-        h5file.create_dataset("t", data=t)
-        h5file.create_dataset("Q", data=Q)
-
-    print(f"Training data saved to {filepath}")
 
 
 def generate_basics_data(filepath: str = "basics_data.h5"):
@@ -152,7 +142,7 @@ def generate_basics_data(filepath: str = "basics_data.h5"):
 
     f.close()
 
-    print(f"Training data saved to {filepath}")
+    print(f"Data saved to {filepath}")
 
 
 def generate_external_inputs_data(filepath: str = "inputs_data.h5"):
@@ -214,7 +204,7 @@ def generate_external_inputs_data(filepath: str = "inputs_data.h5"):
         test_grp.create_dataset(f"U_{idx}", data=U_test)
 
     f.close()
-    print(f"Training data saved to {filepath}")
+    print(f"Data saved to {filepath}")
 
 
 def generate_parametric_data(filepath: str = "parametric_data.h5"):
@@ -227,12 +217,13 @@ def generate_parametric_data(filepath: str = "parametric_data.h5"):
     def q_0(x):
         return np.exp(alpha * (x - 1)) + np.exp(-alpha * x) - np.exp(-alpha)
 
-    # create logarithmically spaced values for mu
+    # initialize the h5 file to write to
+    f = h5py.File(filepath, "w")
+
+    # generate and write training data
     num_training_parameters = 10
     training_parameters = np.logspace(-1, 1, num_training_parameters)
 
-    # initialize the h5 file to write to
-    f = h5py.File(filepath, "w")
     train_grp = f.create_group("train")
     train_grp.attrs["num_mu_values"] = num_training_parameters
 
@@ -241,13 +232,26 @@ def generate_parametric_data(filepath: str = "parametric_data.h5"):
 
         if idx == 0:
             # on the first iteration, also save the temporal dimension
-            train_grp.create_dataset("t", data=t)
+            f.create_dataset("t", data=t)
 
         dset = train_grp.create_dataset(f"Step {idx+1}", data=Q)
         dset.attrs["mu"] = mu
 
+    # generate and write test data
+    test_parameters = np.sqrt(
+        training_parameters[:-1] * training_parameters[1:]
+    )
+    test_grp = f.create_group("test")
+    test_grp.attrs["num_mu_values"] = len(test_parameters)
+
+    for idx, mu in enumerate(test_parameters):
+        _, Q = generate_training_data(n_samples, n_timesteps, q_0, mu=mu)
+
+        dset = test_grp.create_dataset(f"Step {idx+1}", data=Q)
+        dset.attrs["mu"] = mu
+
     f.close()
-    print(f"Training data saved to {filepath}")
+    print(f"Data saved to {filepath}")
 
 
 if __name__ == "__main__":
