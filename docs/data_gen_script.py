@@ -33,6 +33,7 @@ def generate_training_data(
     Returns:
     t: Array of time points.
     Q: Array of "observed" snapshots, shape (n_samples, n_timesteps).
+    x: Array of spatial points (for parametric models)
     """
     # construct the spatial and temporal domains
     x = np.linspace(0, 1, n_samples + 2)[1:-1]
@@ -86,6 +87,7 @@ def generate_training_data(
                 t_eval=t,
                 method="BDF",
             ).y,
+            x,
         )
 
 
@@ -228,11 +230,14 @@ def generate_parametric_data(filepath: str = "parametric_data.h5"):
     train_grp.attrs["num_mu_values"] = num_training_parameters
 
     for idx, mu in enumerate(training_parameters):
-        t, Q = generate_training_data(n_samples, n_timesteps, q_0, mu=mu)
+        t, Q, x = generate_training_data(n_samples, n_timesteps, q_0, mu=mu)
 
         if idx == 0:
-            # on the first iteration, also save the temporal dimension
+            # on the first iteration,
+            # also save the temporal and spatial dimensions
             f.create_dataset("t", data=t)
+            f.create_dataset("x", data=x)
+            f.create_dataset("q_0", data=q_0(x))
 
         dset = train_grp.create_dataset(f"Step {idx+1}", data=Q)
         dset.attrs["mu"] = mu
@@ -245,7 +250,7 @@ def generate_parametric_data(filepath: str = "parametric_data.h5"):
     test_grp.attrs["num_mu_values"] = len(test_parameters)
 
     for idx, mu in enumerate(test_parameters):
-        _, Q = generate_training_data(n_samples, n_timesteps, q_0, mu=mu)
+        _, Q, _ = generate_training_data(n_samples, n_timesteps, q_0, mu=mu)
 
         dset = test_grp.create_dataset(f"Step {idx+1}", data=Q)
         dset.attrs["mu"] = mu
