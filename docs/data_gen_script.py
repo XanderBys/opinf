@@ -185,17 +185,20 @@ def generate_external_inputs_data(filepath: str = "inputs_data.h5"):
 
     train_grp = f.create_group("train")
     test_grp = f.create_group("test")
+    train_grp.attrs["num_input_functions"] = len(train_inputs)
+    test_grp.attrs["num_input_functions"] = len(test_inputs)
 
     # for each input function, generate data for the inputs and state snapshots
     # then, save that data to a new dataset in the file
     for idx, [train_input, test_input] in enumerate(
         zip(train_inputs, test_inputs)
     ):
-        _, Q_train = generate_training_data(
+        t, Q_train = generate_training_data(
             n_samples, n_timesteps, q_0, u=train_input
         )
         U_train = train_input(t)
-        _, Q_test = generate_training_data(
+
+        t, Q_test = generate_training_data(
             n_samples, n_timesteps, q_0, u=test_input
         )
         U_test = test_input(t)
