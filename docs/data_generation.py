@@ -13,47 +13,28 @@ def generate_training_data(
     n_timesteps: int,
     q_0: Callable[[np.ndarray], np.ndarray],
     u: Callable[[int], np.ndarray] | None = None,
+    mu: float | None = None,
 ):
-    """Generate training data using a continuous dynamical system model.
+    """Generate sample data to be used for Operator Inference.
 
-    Solves a parametrized advection-diffusion equation subject to external
-    inputs and saves the time-evolved state snapshots. Uses the Operator
-    Inference library to construct and evaluate a continuous model.
+    Args:
+    n_samples: Number of spatial samples.
+    n_timesteps: Number of time steps.
+    q_0: Initial condition function. Accepts an array of spatial locations and
+        returns an array of initial condition values.
+    u: External input function. Accepts a time value and returns the input
+        values for that time step. If None, u defaults is the zero function
+        (for a model that does not use external inputs)
+    mu: Model parameter. If none, a non-parametric model is used.
 
-    Parameters
-    ----------
-    n_samples : int
-        Number of spatial grid points (excluding boundary points).
-    n_timesteps : int
-        Number of time steps at which to evaluate the solution.
-    q_0 : Callable[[np.ndarray], np.ndarray]
-        Initial condition function. Takes an array of spatial locations
-        and returns initial values at those locations.
-    u : callable or None, optional
-        External input function. Takes a time value (float) and returns
-        the input values at that time. If None, the system has no external
-        inputs and defaults to a zero function. Default is None.
+    Note: 'u' and 'mu' cannot both be specified
+    (the model can use external inputs or parameters or neither, but not both)
 
-    Returns
-    -------
-    t : np.ndarray
-        Time points, shape (n_timesteps,).
-    Q : np.ndarray
-        Snapshots of the state solution, shape (n_samples, n_timesteps).
-
-    Notes
-    -----
-    The model is based on an advection-diffusion equation with a discrete
-    Laplacian operator on the domain [0, 1] with homogeneous Dirichlet
-    boundary conditions. The solution is computed using the BDF method.
+    Returns:
+    t: Array of time points.
+    Q: Array of "observed" snapshots, shape (n_samples, n_timesteps).
+    x: Array of spatial points (for parametric models)
     """
-    external_inputs = True
-    if u is None:
-        external_inputs = False
-
-        def u(t):
-            return 0
-
     # construct the spatial and temporal domains
     x = np.linspace(0, 1, n_samples + 2)[1:-1]
     dx = x[1] - x[0]
@@ -63,23 +44,51 @@ def generate_training_data(
     diags = np.array([1, -2, 1]) / dx**2
     A = scipy.sparse.diags(diags, [-1, 0, 1], (n_samples, n_samples))
 
-    # construct the matrix of external input operators
-    B = np.zeros_like(x)
-    B[0], B[-1] = 1 / dx**2, 1 / dx**2
+    if mu is None:
+        # non-parametric
 
-    fom = opinf.models.ContinuousModel(
-        operators=[
-            opinf.operators.LinearOperator(A),
-            opinf.operators.InputOperator(B),
-        ]
-    )
+        external_inputs = True
+        if u is None:
+            external_inputs = False
 
-    initial_values = q_0(x)
-    initial_values = (
-        initial_values if not external_inputs else initial_values * u(0)
-    )
+            def u(t):
+                return 0
 
-    return t, fom.predict(initial_values, t, input_func=u, method="BDF")
+        # construct the matrix of external input operators
+        B = np.zeros_like(x)
+        B[0], B[-1] = 1 / dx**2, 1 / dx**2
+
+        fom = opinf.models.ContinuousModel(
+            operators=[
+                opinf.operators.LinearOperator(A),
+                opinf.operators.InputOperator(B),
+            ]
+        )
+
+        initial_values = q_0(x)
+        initial_values = (
+            initial_values if not external_inputs else initial_values * u(0)
+        )
+
+        return t, fom.predict(initial_values, t, input_func=u, method="BDF")
+    else:
+        # parametric
+
+        # construct the constant term dependent on mu
+        c0 = np.zeros_like(x)
+        c0[0], c0[-1] = 1 / dx**2, 1 / dx**2
+
+        return (
+            t,
+            scipy.integrate.solve_ivp(
+                fun=lambda t, q: mu * (c0 + A @ q),
+                y0=q_0(x),
+                t_span=[t[0], t[-1]],
+                t_eval=t,
+                method="BDF",
+            ).y,
+            x,
+        )
 
 
 def generate_basics_data(filepath: str = "basics_data.h5"):
@@ -268,6 +277,56 @@ def generate_external_inputs_data(filepath: str = "inputs_data.h5"):
     print(f"Training data saved to {filepath}")
 
 
+def generate_parametric_data(filepath: str = "parametric_data.h5"):
+    n_samples = 1023
+    n_timesteps = 401
+
+    alpha = 100
+
+    # the part of the initial condition independent of u(t)
+    def q_0(x):
+        return np.exp(alpha * (x - 1)) + np.exp(-alpha * x) - np.exp(-alpha)
+
+    # initialize the h5 file to write to
+    f = h5py.File(filepath, "w")
+
+    # generate and write training data
+    num_training_parameters = 10
+    training_parameters = np.logspace(-1, 1, num_training_parameters)
+
+    train_grp = f.create_group("train")
+    train_grp.attrs["num_mu_values"] = num_training_parameters
+
+    for idx, mu in enumerate(training_parameters):
+        t, Q, x = generate_training_data(n_samples, n_timesteps, q_0, mu=mu)
+
+        if idx == 0:
+            # on the first iteration,
+            # also save the temporal and spatial dimensions
+            f.create_dataset("t", data=t)
+            f.create_dataset("x", data=x)
+            f.create_dataset("q_0", data=q_0(x))
+
+        dset = train_grp.create_dataset(f"Step {idx+1}", data=Q)
+        dset.attrs["mu"] = mu
+
+    # generate and write test data
+    test_parameters = np.sqrt(
+        training_parameters[:-1] * training_parameters[1:]
+    )
+    test_grp = f.create_group("test")
+    test_grp.attrs["num_mu_values"] = len(test_parameters)
+
+    for idx, mu in enumerate(test_parameters):
+        _, Q, _ = generate_training_data(n_samples, n_timesteps, q_0, mu=mu)
+
+        dset = test_grp.create_dataset(f"Step {idx+1}", data=Q)
+        dset.attrs["mu"] = mu
+
+    f.close()
+    print(f"Data saved to {filepath}")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Generate training data for Operator Inference tutorials."
@@ -293,6 +352,6 @@ if __name__ == "__main__":
             str(BASE_DIR / "source" / "tutorials" / "inputs_data.h5")
         )
     if args.dataset == "parametric" or args.dataset == "all":
-        raise NotImplementedError(
-            "The parametric dataset has not been implemented yet."
+        generate_parametric_data(
+            str(BASE_DIR / "source" / "tutorials" / "parametric_data.h5")
         )
